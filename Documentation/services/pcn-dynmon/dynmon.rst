@@ -20,10 +20,17 @@ Limitations
 -----------
 - The OpenMetrics format does not support complex data structures, hence the maps are exported only if their value type is a simple type (structs and unions are not supported)
 - The OpenMetrics Histogram and Summary metrics are not yet supported
+- Data extraction is possible only in the following maps (as listed in [MapExtractor.cpp#L287](https://github.com/polycube-network/polycube/blob/master/src/services/pcn-dynmon/src/extractor/MapExtractor.cpp#L287)):
+  - BPF_MAP_TYPE_HASH, BPF_MAP_TYPE_PERCPU_HASH
+  - BPF_MAP_TYPE_LRU_HASH, BPF_MAP_TYPE_LRU_PERCPU_HASH,
+  - BPF_MAP_TYPE_ARRAY, BPF_MAP_TYPE_PERCPU_ARRAY
+  - BPF_MAP_TYPE_QUEUE, BPF_MAP_TYPE_STACK
+
+Furthermore, optimized data extraction (the so called *batch operations*), are supported only by BPF_MAP_TYPE_HASH, BPF_MAP_TYPE_LRU_HASH, BPF_MAP_TYPE_ARRAY.
+
 
 How to use
 ----------
-
 
 Creating the service
 ^^^^^^^^^^^^^^^^^^^^
@@ -43,7 +50,7 @@ Configuration examples can be found in the *examples* directory.
 
 
 Attaching to a interface
-^^^^^^^^^^^^^^^^^^^^^^^^^^^
+^^^^^^^^^^^^^^^^^^^^^^^^
 ::
 
     # Attach the service to a network interface
@@ -229,14 +236,14 @@ The code compilation is performed every time new code is injected, both for Ingr
 
 There are two different type of compilation:
 
-- ENHANCED
+- PROGRAM_INDEX_SWAP
 
-- BASE
+- PROGRAM_RELOAD
   
-Enhanced Compilation
-^^^^^^^^^^^^^^^^^^^^
+PROGRAM_INDEX_SWAP rewrite
+^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-The Enhanced compilation type is the best you can get from this rewriter by now. It is extremely sophisticated and not easy at all to undestand, since we have tried to take into account as many scenarios as possible. This said, let's analyze it.
+The PROGRAM_INDEX_SWAP rewrite type is the best you can get from this rewriter by now. It is extremely sophisticated and not easy at all to understand, since we have tried to take into account as many scenarios as possible. This said, let's analyze it.
 
 During the first phase of this compilation, all the maps declared with the ``"swap-on-read"`` feature enabled are parsed, checking if their declaration in the code matches one of the following rules:
 
@@ -251,12 +258,12 @@ If a user created a map of such type, then he probably wants to use another prev
 
 If the map did not match one of these rules, then it is left unchanged in the cloned code, meaning that there will be another program-local map with limited scope that will be read alternatively.
 
-The second phase consists is checking all those maps which are not declared as swappable. The rewriter retrieve all those declarations and checks for them to see if it is able to modify it. In fact, during this phase, whenever it encounters a declaration which it is unable to modify, it stops and uses the BASE compilation as fallback, to let everything run as required, even though in an sub-optimal optimized way.
+The second phase consists is checking all those maps which are not declared as swappable. The rewriter retrieve all those declarations and checks for them to see if it is able to modify it. In fact, during this phase, whenever it encounters a declaration which it is unable to modify, it stops and uses the PROGRAM_RELOAD compilation as fallback, to let everything run as required, even though in an sub-optimal optimized way.
 
 Since those map must not swap, the rewriter tries to declare a map which is shared among the original and cloned program, in order to make the map visible from both of them. For all those maps, these rules are applied:
 
 - if the map is declared as _PINNED or "extern", then it will be left unchanged in the cloned program, since the user is using an extern map which should exists a priori
-- if the map is NOT declared using the standard (BPF_TABLE and BPF_QUEUESTACK) helpers, then the compilation stops and the BASE one is used, since the rewriter is not able by now to change such declarations into specific one (eg. from BPF_ARRAY(...) to BPF_TABLE("array"...), too many possibilities and variadic parameters)
+- if the map is NOT declared using the standard (BPF_TABLE and BPF_QUEUESTACK) helpers, then the compilation stops and the PROGRAM_RELOAD one is used, since the rewriter is not able by now to change such declarations into specific one (eg. from BPF_ARRAY(...) to BPF_TABLE("array"...), too many possibilities and variadic parameters)
 - if the map is declared as _SHARED or _PUBLIC, then the declaration is changed in the cloned code into "extern", meaning that the map is already declared in the original code
 - otherwise, the declaration in the original code is changed into BPF_TABLE_SHARED/BPF_QUEUESTACK_SHARED and in the cloned code the map will be declared as "extern". Moreover, the map name will be changed into ``MAP_NAME_INGRESS`` or ``MAP_NAME_EGRESS`` to avoid such much to collide with others declared in a different program type.
 
@@ -264,11 +271,11 @@ Once finished, both the original and cloned code are ready to be inserted in the
 
 The PIVOTING code simply calls the original/cloned program main function according to the current program index. This program index is stored in an internal BPF_TABLE and it is changed every time a user performs a read. When the index refers to the original code, the PIVOTING function will call the original code main function, and vice versa.
 
-Thanks to this technique, every time a user requires metrics there's only almost 4ms overhead due to changing the index from ControlPlane, which compared to the 400ms using the BASE compilation, is an extremely advantage we are proud of having developed.
+Thanks to this technique, every time a user requires metrics there's only almost 4ms overhead due to changing the index from ControlPlane, which compared to the 400ms using the PROGRAM_RELOAD compilation, is an extremely advantage we are proud of having developed.
 
 
-Basic Compilation
-^^^^^^^^^^^^^^^^^
+PROGRAM_RELOAD compilation
+^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 This compilation type is quite simple to understand. It is used as a fallback compilation, since it achieves the map swap function, but in a more time expensive way. In fact, when this option is used, it is generated a new code starting from the original injected one, and then the following steps are followed:
 
@@ -280,6 +287,6 @@ Since we have to guarantee map read atomicity, we declare a new parallel map wit
 
 Both the new and old map declaration need to be places in the codes, otherwise they would not know about the other maps other than the ones they have declared.
 
-The codes are, as said, alternatively injected in the probe, but it is worth noticing that although the Enhanced compilation, this one requires LLVM to compile the current code every time it is swapped.
+The codes are, as said, alternatively injected in the probe, but it is worth noticing that although the PROGRAM_INDEX_SWAP compilation, this one requires LLVM to compile the current code every time it is swapped.
 
 Some tests have been run and their results led to 400ms on average of overhead each time the user requires metrics, due to the LLVM compilation time and the time to inject the code in the probe. Obviously, it is not the better solution, but at least it provides the user all the functionality he asked for, even though the enhanced compilation went wrong.
